@@ -2,19 +2,23 @@ import torch
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from vit import ViT
+from vit import ViT, PerformerViT
 import time
 import logging
 import csv
 import argparse
 from tqdm import tqdm
-##nohup python train_vit.py --patch_size 4 --num_epochs 50 --dropout 0.1 --emb_dropout 0.1 --csv_file vit_patch4.csv --batch_size 64 --learning_rate 0.0003 > vit4.log 2>&1 &
+## nohup python train_vit.py --model_type vit --patch_size 4 --num_epochs 100 --dropout 0.1 --emb_dropout 0.1 --csv_file vit_original.csv --batch_size 128 --learning_rate 0.00064 --model_name vit_model.pth --qkv_bias > vit4.log 2>&1 &
 
-##nohup python train_vit.py --patch_size 8 --num_epochs 50 --dropout 0.1 --emb_dropout 0.1 --csv_file vit_a10_patch8.csv --batch_size 128 --learning_rate 0.0003 > vit8.log 2>&1 &
+# nohup python train_vit.py --model_type performer --patch_size 4 --num_epochs 100 --dropout 0.1 --emb_dropout 0.1 --kernel_fn relu --generalized_attention True --nb_features 256 --csv_file performer_relu.csv --batch_size 128 --learning_rate 0.00064 --model_name performer_relu_model.pth --qkv_bias > performer-relu.log 2>&1 &
+
+# nohup python train_vit.py --model_type performer --patch_size 4 --num_epochs 100 --dropout 0.1 --emb_dropout 0.1 --kernel_fn exp --nb_features 256 --csv_file --csv_file performer_exp.csv --batch_size 128 --learning_rate 0.00064 --model_name performer_exp_model.pth --qkv_bias > performer-exp.log 2>&1 &
+
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="ViT Training Configuration")
+    parser = argparse.ArgumentParser(description="Model Training Configuration")
+    parser.add_argument("--model_type", type=str, default="vit", choices=["vit", "performer"], help="Model type: vit or performer")
     parser.add_argument("--image_size", type=int, default=32, help="Input image size")
     parser.add_argument("--patch_size", type=int, default=4, help="Patch size")
     parser.add_argument("--num_classes", type=int, default=10, help="Number of output classes")
@@ -31,8 +35,66 @@ def parse_args():
     parser.add_argument("--num_epochs", type=int, default=30, help="Number of training epochs")
     parser.add_argument("--learning_rate", type=float, default=0.001, help="Learning rate")
     parser.add_argument("--epoch_step", type=int, default=5, help="Number of epochs after which to test")
-    parser.add_argument("--csv_file", type=str, default="training_vit.csv", help="Path to save the CSV log file")
+    parser.add_argument("--csv_file", type=str, default="training_log.csv", help="Path to save the CSV log file")
+    parser.add_argument("--model_name", type=str, default="model.pth", help="File name to save the trained model")
+    # Performer-specific arguments
+    parser.add_argument("--nb_features", type=int, default=None, help="Number of random features for Performer")
+    parser.add_argument("--generalized_attention", type=bool, default=False, help="Use generalized attention in Performer")
+    parser.add_argument("--kernel_fn", type=str, default="relu", choices=["relu", "exp"], help="Kernel function for Performer")
+    parser.add_argument("--no_projection", action="store_true", help="Disable projection in Performer")
+    parser.add_argument("--qkv_bias", action="store_true", help="Add bias to QKV projections")
+
     return parser.parse_args()
+
+def create_model(args, device):
+    if args.model_type == "vit":
+        model = ViT(
+            image_size=args.image_size,
+            patch_size=args.patch_size,
+            num_classes=args.num_classes,
+            dim=args.dim,
+            depth=args.depth,
+            heads=args.heads,
+            mlp_dim=args.mlp_dim,
+            pool=args.pool,
+            channels=args.channels,
+            dim_head=args.dim_head,
+            dropout=args.dropout,
+            emb_dropout=args.emb_dropout,
+            qkv_bias=args.qkv_bias
+        )
+    elif args.model_type == "performer":
+        if args.kernel_fn == "relu":
+            kernel_fn = torch.nn.ReLU()
+            generalized_attention = True
+        else:  # "exp" or default
+            kernel_fn = None  # default Softmax Kernel
+            generalized_attention = False
+
+        model = PerformerViT(
+            image_size=args.image_size,
+            patch_size=args.patch_size,
+            num_classes=args.num_classes,
+            dim=args.dim,
+            depth=args.depth,
+            heads=args.heads,
+            mlp_dim=args.mlp_dim,
+            pool=args.pool,
+            channels=args.channels,
+            dim_head=args.dim_head,
+            dropout=args.dropout,
+            emb_dropout=args.emb_dropout,
+            nb_features=args.nb_features,
+            generalized_attention=generalized_attention,
+            kernel_fn=kernel_fn,
+            no_projection=args.no_projection,
+            qkv_bias=args.qkv_bias
+        )
+    else:
+        raise ValueError(f"Unknown model type: {args.model_type}")
+
+    return model.to(device)
+
 
 def train(model, train_loader, test_loader, optimizer, criterion, device, num_epochs=30, epoch_step=5, csv_file="training_vit.csv"):
     model.train()
@@ -148,7 +210,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, handlers=[file_handler, stream_handler])
 
     train_transform = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
+        # transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
@@ -161,28 +223,14 @@ if __name__ == "__main__":
     train_dataset = datasets.CIFAR10(root='./data', train=True, download=False, transform=train_transform)
     test_dataset = datasets.CIFAR10(root='./data', train=False, download=False, transform=test_transform)
 
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     logging.info(f"Using device: {device}")
 
-
-    model = ViT(
-    image_size=args.image_size,
-    patch_size=args.patch_size,
-    num_classes=args.num_classes,
-    dim=args.dim,
-    depth=args.depth,
-    heads=args.heads,
-    mlp_dim=args.mlp_dim,
-    pool=args.pool,
-    channels=args.channels,
-    dim_head=args.dim_head,
-    dropout=args.dropout,
-    emb_dropout=args.emb_dropout
-).to(device)
+    model = create_model(args, device)
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=1e-4)
 
@@ -199,19 +247,20 @@ if __name__ == "__main__":
         epoch_step=args.epoch_step,
         csv_file=args.csv_file
     )
-
+    with open(args.csv_file, mode="a", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow([])
+        writer.writerow(["Args Information"])
+        for key, value in vars(args).items():
+            writer.writerow([key, value])
 
     logging.info("Starting testing...")
     test_loss, test_acc, inference_time = test(model, test_loader, criterion, device)
     logging.info(f"Final Test Loss: {test_loss:.4f}, Final Test Accuracy: {test_acc:.4f}%")
 
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    model_path = f"model_vit_{args.csv_file.split('.')[0]}_{timestamp}.pth"
-    torch.save(model, model_path)
+    model_path = args.model_name
+    torch.save(model.state_dict(), model_path)
     logging.info(f"Model saved as {model_path}")
-    for i, t in enumerate(epoch_times):
-        print(f"Epoch {i+1} Training Time: {t:.4f}s")
-        logging.info(f"Epoch {i+1} Training Time: {t:.4f}s")
 
     print(f"Total Training Time: {total_training_time:.4f}s")
     print(f"Inference Time: {inference_time:.4f}s")
