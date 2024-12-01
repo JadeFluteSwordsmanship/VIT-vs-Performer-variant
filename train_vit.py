@@ -1,18 +1,21 @@
 import torch
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
-from vit import ViT, PerformerViT
+from vit import ViT, PerformerViT, LearnableKernel
 import time
 import logging
 import csv
 import argparse
 from tqdm import tqdm
-## nohup python train_vit.py --model_type vit --patch_size 4 --num_epochs 100 --dropout 0.1 --emb_dropout 0.1 --csv_file vit_original.csv --batch_size 128 --learning_rate 0.00064 --model_name vit_model.pth --qkv_bias > vit4.log 2>&1 &
+## nohup python train_vit.py --model_type vit --patch_size 4 --num_epochs 70 --dropout 0.1 --emb_dropout 0.1 --csv_file vit_original.csv --batch_size 256 --learning_rate 0.0025 --model_name vit_model.pth --qkv_bias > vit4.log 2>&1 &
 
-# nohup python train_vit.py --model_type performer --patch_size 4 --num_epochs 100 --dropout 0.1 --emb_dropout 0.1 --kernel_fn relu --generalized_attention True --nb_features 256 --csv_file performer_relu.csv --batch_size 128 --learning_rate 0.00064 --model_name performer_relu_model.pth --qkv_bias > performer-relu.log 2>&1 &
+# nohup python train_vit.py --model_type performer --patch_size 4 --num_epochs 70 --dropout 0.1 --emb_dropout 0.1 --kernel_fn relu --generalized_attention True --nb_features 128 --csv_file performer_relu.csv --batch_size 256 --learning_rate 0.0025 --model_name performer_relu_model.pth --qkv_bias > performer-relu.log 2>&1 &
 
-# nohup python train_vit.py --model_type performer --patch_size 4 --num_epochs 100 --dropout 0.1 --emb_dropout 0.1 --kernel_fn exp --nb_features 256 --csv_file --csv_file performer_exp.csv --batch_size 128 --learning_rate 0.00064 --model_name performer_exp_model.pth --qkv_bias > performer-exp.log 2>&1 &
+# nohup python train_vit.py --model_type performer --patch_size 4 --num_epochs 80 --dropout 0.1 --emb_dropout 0.1 --kernel_fn exp --nb_features 128 --csv_file  performer_exp.csv --batch_size 256 --learning_rate 0.0025 --model_name performer_exp_model.pth --qkv_bias > performer-exp.log 2>&1 &
+
+# nohup python train_vit.py --model_type performer --patch_size 4 --num_epochs 70 --dropout 0.1 --emb_dropout 0.1 --kernel_fn learnable --nb_features 128 --csv_file  performer_fvariant.csv --batch_size 256 --learning_rate 0.0025 --model_name performer_fvariant_model.pth --qkv_bias > performer-fvariant.log 2>&1 &
 
 
 
@@ -24,11 +27,11 @@ def parse_args():
     parser.add_argument("--num_classes", type=int, default=10, help="Number of output classes")
     parser.add_argument("--dim", type=int, default=128, help="Embedding dimension")
     parser.add_argument("--depth", type=int, default=6, help="Number of Transformer layers")
-    parser.add_argument("--heads", type=int, default=4, help="Number of attention heads")
+    parser.add_argument("--heads", type=int, default=8, help="Number of attention heads")
     parser.add_argument("--mlp_dim", type=int, default=256, help="MLP intermediate dimension")
     parser.add_argument("--pool", type=str, default="cls", choices=["cls", "mean"], help="Pooling method")
     parser.add_argument("--channels", type=int, default=3, help="Number of input channels")
-    parser.add_argument("--dim_head", type=int, default=64, help="Dimension of each attention head")
+    parser.add_argument("--dim_head", type=int, default=32, help="Dimension of each attention head")
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate")
     parser.add_argument("--emb_dropout", type=float, default=0.1, help="Embedding dropout rate")
     parser.add_argument("--batch_size", type=int, default=64, help="Batch size for training and testing")
@@ -40,7 +43,7 @@ def parse_args():
     # Performer-specific arguments
     parser.add_argument("--nb_features", type=int, default=None, help="Number of random features for Performer")
     parser.add_argument("--generalized_attention", type=bool, default=False, help="Use generalized attention in Performer")
-    parser.add_argument("--kernel_fn", type=str, default="relu", choices=["relu", "exp"], help="Kernel function for Performer")
+    parser.add_argument("--kernel_fn", type=str, default="relu", choices=["relu", "exp", "learnable"], help="Kernel function for Performer")
     parser.add_argument("--no_projection", action="store_true", help="Disable projection in Performer")
     parser.add_argument("--qkv_bias", action="store_true", help="Add bias to QKV projections")
 
@@ -66,6 +69,9 @@ def create_model(args, device):
     elif args.model_type == "performer":
         if args.kernel_fn == "relu":
             kernel_fn = torch.nn.ReLU()
+            generalized_attention = True
+        elif args.kernel_fn == "learnable":
+            kernel_fn = LearnableKernel(args.nb_features)
             generalized_attention = True
         else:  # "exp" or default
             kernel_fn = None  # default Softmax Kernel
@@ -96,7 +102,7 @@ def create_model(args, device):
     return model.to(device)
 
 
-def train(model, train_loader, test_loader, optimizer, criterion, device, num_epochs=30, epoch_step=5, csv_file="training_vit.csv"):
+def train(model, train_loader, test_loader, optimizer, scheduler, criterion, device, num_epochs=30, epoch_step=5, csv_file="training_vit.csv"):
     model.train()
     epoch_times = []  # 用于记录每个 epoch 的时间
     total_start_time = time.time()  # 总训练时间开始计时
@@ -105,7 +111,7 @@ def train(model, train_loader, test_loader, optimizer, criterion, device, num_ep
     # 初始化 CSV 文件
     with open(csv_file, mode="w", newline="") as file:
         writer = csv.writer(file)
-        writer.writerow(["Epoch", "Train Loss", "Train Accuracy", "Train Time (s)", "Test Loss", "Test Accuracy", "Inference Time (s)"])
+        writer.writerow(["Epoch", "Train Loss", "Train Accuracy", "Train Time (s)", "Test Loss", "Test Accuracy", "Inference Time (s)", "Learning Rate"])
 
     for epoch in range(num_epochs):
         epoch_start_time = time.time()  # 当前 epoch 开始计时
@@ -113,6 +119,7 @@ def train(model, train_loader, test_loader, optimizer, criterion, device, num_ep
         correct = 0
         total = 0
         loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
+
         for images, labels in loop:
             images, labels = images.to(device), labels.to(device)
             optimizer.zero_grad()
@@ -130,6 +137,9 @@ def train(model, train_loader, test_loader, optimizer, criterion, device, num_ep
             # 更新进度条
             loop.set_postfix(loss=loss.item(), accuracy=100. * correct / total)
 
+        # 调整学习率
+        scheduler.step()
+
         epoch_end_time = time.time()  # 当前 epoch 结束计时
         epoch_time = epoch_end_time - epoch_start_time
         epoch_times.append(epoch_time)
@@ -137,8 +147,14 @@ def train(model, train_loader, test_loader, optimizer, criterion, device, num_ep
         # 打印和记录日志
         epoch_loss = total_loss / len(train_loader)
         epoch_acc = 100. * correct / total
-        print(f"Epoch {epoch+1}/{num_epochs}: Loss: {epoch_loss:.4f}, Accuracy: {epoch_acc:.4f}%, Time: {epoch_time:.4f}s")
-        logging.info(f"Epoch {epoch+1}/{num_epochs}: Loss: {epoch_loss:.4f}, Accuracy: {epoch_acc:.4f}%, Time: {epoch_time:.4f}s")
+        current_lr = optimizer.param_groups[0]["lr"]  # 获取当前学习率
+        print(
+            f"Epoch {epoch + 1}/{num_epochs}: Loss: {epoch_loss:.4f}, Accuracy: {epoch_acc:.4f}%, Time: {epoch_time:.4f}s, LR: {current_lr:.6f}")
+        logging.info(
+            f"Epoch {epoch + 1}/{num_epochs}: Loss: {epoch_loss:.4f}, Accuracy: {epoch_acc:.4f}%, Time: {epoch_time:.4f}s, LR: {current_lr:.6f}")
+        for name, param in model.named_parameters():
+            if 'LearnableKernel' in name:
+                logging.debug(f"Parameter: {name}, Grad Norm: {param.grad.norm()}")
 
         # 初始化测试相关变量
         test_loss = None
@@ -149,12 +165,14 @@ def train(model, train_loader, test_loader, optimizer, criterion, device, num_ep
         if (epoch + 1) % epoch_step == 0 or (epoch + 1) == num_epochs:
             test_loss, test_acc, inference_time = test(model, test_loader, criterion, device)
             test_results.append((epoch + 1, test_loss, test_acc, inference_time))
-            logging.info(f"Epoch {epoch+1}/{num_epochs} - Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.4f}%, Inference Time: {inference_time:.4f}s")
+            logging.info(
+                f"Epoch {epoch + 1}/{num_epochs} - Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.4f}%, Inference Time: {inference_time:.4f}s")
 
-        # 将结果写入 CSV 文件
+            # 将结果写入 CSV 文件
         with open(csv_file, mode="a", newline="") as file:
             writer = csv.writer(file)
-            writer.writerow([epoch + 1, epoch_loss, epoch_acc, epoch_time, test_loss, test_acc, inference_time])
+            writer.writerow(
+                [epoch + 1, epoch_loss, epoch_acc, epoch_time, test_loss, test_acc, inference_time, current_lr])
 
     total_end_time = time.time()  # 总训练时间结束计时
     total_training_time = total_end_time - total_start_time
@@ -210,7 +228,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, handlers=[file_handler, stream_handler])
 
     train_transform = transforms.Compose([
-        # transforms.RandomCrop(32, padding=4),
+        transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
@@ -223,8 +241,8 @@ if __name__ == "__main__":
     train_dataset = datasets.CIFAR10(root='./data', train=True, download=False, transform=train_transform)
     test_dataset = datasets.CIFAR10(root='./data', train=False, download=False, transform=test_transform)
 
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -232,8 +250,8 @@ if __name__ == "__main__":
 
     model = create_model(args, device)
     criterion = torch.nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=1e-4)
-
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=3e-5)
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.num_epochs)
     logging.info("Starting training...")
     logging.info(f"Configuration: {vars(args)}")
     epoch_times, total_training_time, test_results = train(
@@ -241,6 +259,7 @@ if __name__ == "__main__":
         train_loader=train_loader,
         test_loader=test_loader,
         optimizer=optimizer,
+        scheduler=scheduler,
         criterion=criterion,
         device=device,
         num_epochs=args.num_epochs,

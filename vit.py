@@ -114,13 +114,23 @@ def gaussian_orthogonal_random_matrix(nb_rows, nb_columns, scaling=0, device=Non
 
     return torch.diag(multiplier) @ final_matrix
 
+class LearnableKernel(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        self.linear = nn.Linear(input_dim, input_dim)
+        self.activation = nn.Tanh()
+        nn.init.xavier_uniform_(self.linear.weight)
+        nn.init.constant_(self.linear.bias, 0)
+
+    def forward(self, x):
+        return self.activation(self.linear(x))
 
 # linear attention classes with softmax kernel
 
 # non-causal linear attention
-def linear_attention(q, k, v):
+def linear_attention(q, k, v, eps=1e-6):
     k_cumsum = k.sum(dim=-2)
-    D_inv = 1. / torch.einsum('...nd,...d->...n', q, k_cumsum.type_as(q))
+    D_inv = 1. / (torch.einsum('...nd,...d->...n', q, k_cumsum.type_as(q)) + eps)
     context = torch.einsum('...nd,...ne->...de', k, v)
     out = torch.einsum('...de,...nd,...n->...ne', context, q, D_inv)
     return out
@@ -339,8 +349,12 @@ class ViT(nn.Module):
         self.pool = pool
         self.to_latent = nn.Identity()
 
-        self.mlp_head = nn.Linear(dim, num_classes)
-        self.apply(vit_init_weights)
+        self.mlp_head = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.Tanh(),
+            nn.Linear(dim, num_classes)
+        )
+        # self.apply(vit_init_weights)
 
     def forward(self, img):
         x = self.to_patch_embedding(img)
