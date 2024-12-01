@@ -99,10 +99,9 @@ class ViT(nn.Module):
         assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
 
         self.to_patch_embedding = nn.Sequential(
-            Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1=patch_height, p2=patch_width),
-            nn.LayerNorm(patch_dim),
-            nn.Linear(patch_dim, dim),
-            nn.LayerNorm(dim),
+            nn.Conv2d(channels, dim, kernel_size=patch_size, stride=patch_size),  # 改为 Conv2d
+            Rearrange('b c h w -> b (h w) c'),  # 展平为序列
+            nn.LayerNorm(dim)
         )
 
         self.pos_embedding = nn.Parameter(torch.randn(1, num_patches + 1, dim))
@@ -114,7 +113,12 @@ class ViT(nn.Module):
         self.pool = pool
         self.to_latent = nn.Identity()
 
-        self.mlp_head = nn.Linear(dim, num_classes)
+        self.mlp_head = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.Tanh(),  # 添加激活函数
+            nn.Linear(dim, num_classes)
+        )
+        self.apply(vit_init_weights)
 
     def forward(self, img):
         x = self.to_patch_embedding(img)
@@ -131,3 +135,12 @@ class ViT(nn.Module):
 
         x = self.to_latent(x)
         return self.mlp_head(x)
+
+def vit_init_weights(m):
+    if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
+        nn.init.trunc_normal_(m.weight, mean=0.0, std=0.02)
+        if m.bias is not None:
+            nn.init.constant_(m.bias, 0)
+    elif isinstance(m, nn.LayerNorm):
+        nn.init.constant_(m.weight, 1)
+        nn.init.constant_(m.bias, 0)

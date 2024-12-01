@@ -8,9 +8,9 @@ import logging
 import csv
 import argparse
 from tqdm import tqdm
-##nohup python train_vit.py --patch_size 4 --num_epochs 30 --dropout 0.05 --emb_dropout 0.05 --csv_file vit_a10_patch4.csv --batch_size 128 --learning_rate 0.0001 > vit4.log 2>&1 &
+##nohup python train_vit.py --patch_size 4 --num_epochs 50 --dropout 0.1 --emb_dropout 0.1 --csv_file vit_patch4.csv --batch_size 64 --learning_rate 0.0003 > vit4.log 2>&1 &
 
-##nohup python train_vit.py --patch_size 8 --num_epochs 30 --dropout 0.05 --emb_dropout 0.05 --csv_file vit_a10_patch8.csv --batch_size 128 --learning_rate 0.0001 > vit8.log 2>&1 &
+##nohup python train_vit.py --patch_size 8 --num_epochs 50 --dropout 0.1 --emb_dropout 0.1 --csv_file vit_a10_patch8.csv --batch_size 128 --learning_rate 0.0003 > vit8.log 2>&1 &
 
 
 def parse_args():
