@@ -1,42 +1,46 @@
 import torch
 from torchvision import datasets, transforms
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset, DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
 from vit import ViT, PerformerViT, LearnableKernel
 import time
 import logging
 import csv
+import pandas as pd
+import os
+from PIL import Image
+from sklearn.preprocessing import LabelEncoder
 import argparse
 from tqdm import tqdm
-## nohup python train_vit.py --model_type vit --patch_size 4 --num_epochs 100 --dropout 0.1 --emb_dropout 0.1 --csv_file vit_original.csv --batch_size 256 --learning_rate 0.0008 --model_name vit_model.pth --qkv_bias > vit4.log 2>&1 &
+## nohup python train_imagenet.py --model_type vit --patch_size 4 --num_epochs 100 --dropout 0.1 --emb_dropout 0.1 --csv_file vit_original_imagenet.csv --batch_size 128 --learning_rate 0.0012 --model_name vit_model_imgnt.pth --qkv_bias > vit4.log 2>&1 &
 
-# nohup python train_vit.py --model_type performer --patch_size 4 --num_epochs 100 --dropout 0.1 --emb_dropout 0.1 --kernel_fn relu --generalized_attention True --nb_features 128 --csv_file performer_relu.csv --batch_size 256 --learning_rate 0.0008 --model_name performer_relu_model.pth --qkv_bias > performer-relu.log 2>&1 &
+# nohup python train_imagenet.py --model_type performer --patch_size 4 --num_epochs 100 --dropout 0.1 --emb_dropout 0.1 --kernel_fn relu --generalized_attention True --nb_features 128 --csv_file performer_relu_imagenet.csv --batch_size 128 --learning_rate 0.0012 --model_name performer_relu_model_imgnt.pth --qkv_bias > performer-relu.log 2>&1 &
 
-# nohup python train_vit.py --model_type performer --patch_size 4 --num_epochs 100 --dropout 0.1 --emb_dropout 0.1 --kernel_fn exp --nb_features 128 --csv_file  performer_exp.csv --batch_size 256 --learning_rate 0.0008 --model_name performer_exp_model.pth --qkv_bias > performer-exp.log 2>&1 &
+# nohup python train_imagenet.py --model_type performer --patch_size 4 --num_epochs 100 --dropout 0.1 --emb_dropout 0.1 --kernel_fn exp --nb_features 128 --csv_file  performer_exp_imagenet.csv --batch_size 128 --learning_rate 0.0012 --model_name performer_exp_model_imgnt.pth --qkv_bias > performer-exp.log 2>&1 &
 
-# nohup python train_vit.py --model_type performer --patch_size 4 --num_epochs 250 --dropout 0.1 --emb_dropout 0.1 --kernel_fn learnable --nb_features 128 --csv_file  performer_fvariant.csv --batch_size 256 --learning_rate 0.0008 --model_name performer_fvariant_model.pth --qkv_bias > performer-fvariant.log 2>&1 &
+# nohup python train_imagenet.py --model_type performer --patch_size 4 --num_epochs 250 --dropout 0.1 --emb_dropout 0.1 --kernel_fn learnable --nb_features 128 --csv_file  performer_fvariant_imagenet.csv --batch_size 128 --learning_rate 0.0012 --model_name performer_fvariant_model_imgnt.pth --qkv_bias > performer-fvariant.log 2>&1 &
 
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Model Training Configuration")
     parser.add_argument("--model_type", type=str, default="vit", choices=["vit", "performer"], help="Model type: vit or performer")
-    parser.add_argument("--image_size", type=int, default=32, help="Input image size")
+    parser.add_argument("--image_size", type=int, default=64, help="Input image size")
     parser.add_argument("--patch_size", type=int, default=4, help="Patch size")
-    parser.add_argument("--num_classes", type=int, default=10, help="Number of output classes")
-    parser.add_argument("--dim", type=int, default=128, help="Embedding dimension")
+    parser.add_argument("--num_classes", type=int, default=200, help="Number of output classes")
+    parser.add_argument("--dim", type=int, default=256, help="Embedding dimension")
     parser.add_argument("--depth", type=int, default=6, help="Number of Transformer layers")
     parser.add_argument("--heads", type=int, default=8, help="Number of attention heads")
-    parser.add_argument("--mlp_dim", type=int, default=256, help="MLP intermediate dimension")
+    parser.add_argument("--mlp_dim", type=int, default=512, help="MLP intermediate dimension")
     parser.add_argument("--pool", type=str, default="cls", choices=["cls", "mean"], help="Pooling method")
     parser.add_argument("--channels", type=int, default=3, help="Number of input channels")
-    parser.add_argument("--dim_head", type=int, default=32, help="Dimension of each attention head")
+    parser.add_argument("--dim_head", type=int, default=64, help="Dimension of each attention head")
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate")
     parser.add_argument("--emb_dropout", type=float, default=0.1, help="Embedding dropout rate")
     parser.add_argument("--batch_size", type=int, default=64, help="Batch size for training and testing")
-    parser.add_argument("--num_epochs", type=int, default=30, help="Number of training epochs")
-    parser.add_argument("--learning_rate", type=float, default=0.001, help="Learning rate")
+    parser.add_argument("--num_epochs", type=int, default=80, help="Number of training epochs")
+    parser.add_argument("--learning_rate", type=float, default=0.002, help="Learning rate")
     parser.add_argument("--epoch_step", type=int, default=5, help="Number of epochs after which to test")
     parser.add_argument("--csv_file", type=str, default="training_log.csv", help="Path to save the CSV log file")
     parser.add_argument("--model_name", type=str, default="model.pth", help="File name to save the trained model")
@@ -218,6 +222,8 @@ def test(model, test_loader, criterion, device):
 
     return test_loss, test_acc, inference_time
 
+
+
 if __name__ == "__main__":
     args = parse_args()
 
@@ -230,32 +236,114 @@ if __name__ == "__main__":
     stream_handler.setFormatter(formatter)
 
     logging.basicConfig(level=logging.DEBUG, handlers=[file_handler, stream_handler])
+    DIR_MAIN = "/root/xusiyuanbj/data/1/tiny-imagenet-200/"
+    DIR_TRAIN = os.path.join(DIR_MAIN, "train/")
+    DIR_VAL = os.path.join(DIR_MAIN, "val/")
+    DIR_TEST = os.path.join(DIR_MAIN, "test/")
+    labels = os.listdir(DIR_TRAIN)
+    encoder_labels = LabelEncoder()
+    encoder_labels.fit(labels)
+    files_train = []
+    labels_train = []
+    for label in labels:
+        for filename in os.listdir(os.path.join(DIR_TRAIN, label, "images/")):
+            files_train.append(os.path.join(DIR_TRAIN, label, "images", filename))
+            labels_train.append(label)
+    files_val = []
+    labels_val = []
+    val_annotations = pd.read_csv(
+        os.path.join(DIR_VAL, "val_annotations.txt"),
+        sep="\t",
+        names=["File", "Label", "X1", "Y1", "X2", "Y2"],
+        usecols=["File", "Label"],
+    )
+    for filename in os.listdir(os.path.join(DIR_VAL, "images/")):
+        filepath = os.path.join(DIR_VAL, "images", filename)
+        label = val_annotations[val_annotations["File"] == filename]["Label"].values[0]
+        files_val.append(filepath)
+        labels_val.append(label)
+    files_test = sorted(
+        [
+            os.path.join(DIR_TEST, "images", filename)
+            for filename in os.listdir(os.path.join(DIR_TEST, "images/"))
+        ]
+    )
 
-    train_transform = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-    ])
-    test_transform = transforms.Compose([
-        transforms.Resize((32, 32)),
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-    ])
-    train_dataset = datasets.CIFAR10(root='./data', train=True, download=False, transform=train_transform)
-    test_dataset = datasets.CIFAR10(root='./data', train=False, download=False, transform=test_transform)
 
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
+    class ImagesDataset(Dataset):
+        def __init__(self, files, labels, encoder, transforms, mode):
+            super().__init__()
+            self.files = files
+            self.labels = labels
+            self.encoder = encoder
+            self.transforms = transforms
+            self.mode = mode
 
+        def __len__(self):
+            return len(self.files)
+
+        def __getitem__(self, index):
+            pic = Image.open(self.files[index]).convert("RGB")
+            x = self.transforms(pic)
+            if self.mode in ["train", "val"]:
+                label = self.labels[index]
+                y = self.encoder.transform([label])[0]
+                return x, y
+            elif self.mode == "test":
+                return x, self.files[index]
+
+
+    # Define transforms
+    transforms_train = transforms.Compose(
+        [
+            transforms.Resize((64, 64)),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize([0.4802, 0.4481, 0.3975], [0.2302, 0.2265, 0.2262]),
+        ]
+    )
+    transforms_val = transforms.Compose(
+        [
+            transforms.Resize((64, 64)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.4802, 0.4481, 0.3975], [0.2302, 0.2265, 0.2262]),
+        ]
+    )
+
+    train_dataset = ImagesDataset(
+        files=files_train,
+        labels=labels_train,
+        encoder=encoder_labels,
+        transforms=transforms_train,
+        mode="train",
+    )
+    val_dataset = ImagesDataset(
+        files=files_val,
+        labels=labels_val,
+        encoder=encoder_labels,
+        transforms=transforms_val,
+        mode="val",
+    )
+    test_dataset = ImagesDataset(
+        files=files_test, labels=None, encoder=None, transforms=transforms_val, mode="test"
+    )
+    train_loader = DataLoader(
+        train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4
+    )
+    test_loader = DataLoader(
+        test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4
+    )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     logging.info(f"Using device: {device}")
 
     model = create_model(args, device)
     criterion = torch.nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=3e-5)
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.num_epochs)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=1e-5)
+    scheduler = CosineAnnealingLR(optimizer, T_max=int(args.num_epochs / 0.866))
     logging.info("Starting training...")
     logging.info(f"Configuration: {vars(args)}")
     epoch_times, total_training_time, test_results = train(
@@ -263,7 +351,7 @@ if __name__ == "__main__":
         train_loader=train_loader,
         test_loader=test_loader,
         optimizer=optimizer,
-        scheduler=None,
+        scheduler=scheduler,
         # scheduler if args.kernel_fn != "learnable" else None,
         criterion=criterion,
         device=device,

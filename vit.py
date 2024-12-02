@@ -117,13 +117,11 @@ def gaussian_orthogonal_random_matrix(nb_rows, nb_columns, scaling=0, device=Non
 class LearnableKernel(nn.Module):
     def __init__(self, input_dim):
         super().__init__()
-        self.linear = nn.Linear(input_dim, input_dim)
-        self.activation = nn.Tanh()
-        nn.init.xavier_uniform_(self.linear.weight)
-        nn.init.constant_(self.linear.bias, 0)
+        self.weight = nn.Parameter(torch.randn(input_dim, input_dim))
+        self.activation = nn.ReLU()
 
     def forward(self, x):
-        return self.activation(self.linear(x))
+        return self.activation(x @ self.weight)
 
 # linear attention classes with softmax kernel
 
@@ -256,12 +254,13 @@ class PerformerAttention(nn.Module):
         self.norm = nn.LayerNorm(dim)
 
         self.to_qkv = nn.Linear(dim, inner_dim * 3, bias=qkv_bias)
-
+        self.generalized_attention = generalized_attention
+        self.kernel_fn = kernel_fn
         self.fast_attention = FastAttention(
             dim_heads=dim_head,
             nb_features=nb_features,
             generalized_attention=generalized_attention,
-            kernel_fn=kernel_fn,
+            kernel_fn=self.kernel_fn if self.kernel_fn else kernel_fn,
             no_projection=no_projection
         )
 
@@ -306,6 +305,10 @@ class PerformerTransformer(nn.Module):
         super().__init__()
         self.norm = nn.LayerNorm(dim)
         self.layers = nn.ModuleList([])
+        if generalized_attention and isinstance(kernel_fn, nn.Module):
+            self.kernel_fn = kernel_fn
+        else:
+            self.kernel_fn = None
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
                 PerformerAttention(dim, heads=heads, dim_head=dim_head, nb_features=nb_features,
@@ -376,6 +379,10 @@ class ViT(nn.Module):
 class PerformerViT(ViT):
     def __init__(self, *, nb_features=None, generalized_attention=False, kernel_fn=nn.ReLU(), no_projection=False, **kwargs):
         super().__init__(**kwargs)
+        if generalized_attention and isinstance(kernel_fn, nn.Module):
+            self.kernel_fn = kernel_fn
+        else:
+            self.kernel_fn = None
 
         self.transformer = PerformerTransformer(
             dim=kwargs['dim'],
@@ -386,7 +393,7 @@ class PerformerViT(ViT):
             dropout=kwargs['dropout'],
             nb_features=nb_features,
             generalized_attention=generalized_attention,
-            kernel_fn=kernel_fn,
+            kernel_fn=self.kernel_fn if self.kernel_fn else kernel_fn,
             no_projection=no_projection
         )
 
