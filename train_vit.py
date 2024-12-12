@@ -1,12 +1,16 @@
 import torch
 from torchvision import datasets, transforms
-from torch.utils.data import DataLoader
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.utils.data import Dataset, DataLoader
+from torch.optim.lr_scheduler import CosineAnnealingLR, CosineAnnealingWarmRestarts
 from tqdm import tqdm
 from vit import ViT, PerformerViT, LearnableKernel
 import time
 import logging
 import csv
+import pandas as pd
+import os
+from PIL import Image
+from sklearn.preprocessing import LabelEncoder
 import argparse
 from tqdm import tqdm
 ## nohup python train_vit.py --model_type vit --patch_size 4 --num_epochs 100 --dropout 0.1 --emb_dropout 0.1 --csv_file vit_original.csv --batch_size 256 --learning_rate 0.0008 --model_name vit_model.pth --qkv_bias > vit4.log 2>&1 &
@@ -73,7 +77,7 @@ def create_model(args, device):
         elif args.kernel_fn == "learnable":
             kernel_fn = LearnableKernel(args.nb_features)
             generalized_attention = True
-        else:  # "exp" or default
+        else:
             kernel_fn = None  # default Softmax Kernel
             generalized_attention = False
 
@@ -104,17 +108,17 @@ def create_model(args, device):
 
 def train(model, train_loader, test_loader, optimizer, scheduler, criterion, device, num_epochs=30, epoch_step=5, csv_file="training_vit.csv"):
     model.train()
-    epoch_times = []  # 用于记录每个 epoch 的时间
-    total_start_time = time.time()  # 总训练时间开始计时
-    test_results = []  # 用于记录测试结果（测试集的 loss 和 accuracy）
+    epoch_times = []
+    total_start_time = time.time()
+    test_results = []
 
-    # 初始化 CSV 文件
+
     with open(csv_file, mode="w", newline="") as file:
         writer = csv.writer(file)
         writer.writerow(["Epoch", "Train Loss", "Train Accuracy", "Train Time (s)", "Test Loss", "Test Accuracy", "Inference Time (s)", "Learning Rate"])
 
     for epoch in range(num_epochs):
-        epoch_start_time = time.time()  # 当前 epoch 开始计时
+        epoch_start_time = time.time()
         total_loss = 0
         correct = 0
         total = 0
@@ -128,27 +132,27 @@ def train(model, train_loader, test_loader, optimizer, scheduler, criterion, dev
             loss.backward()
             optimizer.step()
 
-            # 统计
+
             total_loss += loss.item()
             _, predicted = outputs.max(1)
             correct += predicted.eq(labels).sum().item()
             total += labels.size(0)
 
-            # 更新进度条
+
             loop.set_postfix(loss=loss.item(), accuracy=100. * correct / total)
 
-        # 调整学习率
+
         if scheduler is not None:
             scheduler.step()
 
-        epoch_end_time = time.time()  # 当前 epoch 结束计时
+        epoch_end_time = time.time()
         epoch_time = epoch_end_time - epoch_start_time
         epoch_times.append(epoch_time)
 
-        # 打印和记录日志
+
         epoch_loss = total_loss / len(train_loader)
         epoch_acc = 100. * correct / total
-        current_lr = optimizer.param_groups[0]["lr"]  # 获取当前学习率
+        current_lr = optimizer.param_groups[0]["lr"]
         print(
             f"Epoch {epoch + 1}/{num_epochs}: Loss: {epoch_loss:.4f}, Accuracy: {epoch_acc:.4f}%, Time: {epoch_time:.4f}s, LR: {current_lr:.6f}")
         logging.info(
@@ -160,34 +164,46 @@ def train(model, train_loader, test_loader, optimizer, scheduler, criterion, dev
                 else:
                     logging.warning(f"Parameter: {name} has no grad")
 
-        # 初始化测试相关变量
+        def log_gpu_memory_usage():
+            memory_allocated = torch.cuda.memory_allocated(device)
+            max_memory_allocated = torch.cuda.max_memory_allocated(device)
+            memory_reserved = torch.cuda.memory_reserved(device)
+            max_memory_reserved = torch.cuda.max_memory_reserved(device)
+
+            print(f"Memory Allocated: {memory_allocated / 1024 ** 2:.2f} MiB")
+            print(f"Max Memory Allocated: {max_memory_allocated / 1024 ** 2:.2f} MiB")
+            print(f"Memory Reserved: {memory_reserved / 1024 ** 2:.2f} MiB")
+            print(f"Max Memory Reserved: {max_memory_reserved / 1024 ** 2:.2f} MiB")
+
+        log_gpu_memory_usage()
+
         test_loss = None
         test_acc = None
         inference_time = None
 
-        # 每隔 epoch_step 测试一次模型
+
         if (epoch + 1) % epoch_step == 0 or (epoch + 1) == num_epochs:
             test_loss, test_acc, inference_time = test(model, test_loader, criterion, device)
             test_results.append((epoch + 1, test_loss, test_acc, inference_time))
             logging.info(
                 f"Epoch {epoch + 1}/{num_epochs} - Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.4f}%, Inference Time: {inference_time:.4f}s")
 
-            # 将结果写入 CSV 文件
+
         with open(csv_file, mode="a", newline="") as file:
             writer = csv.writer(file)
             writer.writerow(
                 [epoch + 1, epoch_loss, epoch_acc, epoch_time, test_loss, test_acc, inference_time, current_lr])
 
-    total_end_time = time.time()  # 总训练时间结束计时
+    total_end_time = time.time()
     total_training_time = total_end_time - total_start_time
 
-    # 打印和记录总训练时间
+
     print(f"Total Training Time: {total_training_time:.4f}s")
     logging.info(f"Total Training Time: {total_training_time:.4f}s")
 
     return epoch_times, total_training_time, test_results
 
-# **测试函数**
+
 def test(model, test_loader, criterion, device):
     model.eval()
     total_loss = 0
@@ -202,7 +218,7 @@ def test(model, test_loader, criterion, device):
             outputs = model(images)
             loss = criterion(outputs, labels)
 
-            # 统计
+
             total_loss += loss.item()
             _, predicted = outputs.max(1)
             correct += predicted.eq(labels).sum().item()
@@ -255,7 +271,7 @@ if __name__ == "__main__":
     model = create_model(args, device)
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=3e-5)
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.num_epochs)
+    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=5e-5)
     logging.info("Starting training...")
     logging.info(f"Configuration: {vars(args)}")
     epoch_times, total_training_time, test_results = train(
@@ -263,8 +279,8 @@ if __name__ == "__main__":
         train_loader=train_loader,
         test_loader=test_loader,
         optimizer=optimizer,
-        scheduler=None,
-        # scheduler if args.kernel_fn != "learnable" else None,
+        scheduler=scheduler,
+
         criterion=criterion,
         device=device,
         num_epochs=args.num_epochs,
